@@ -1,0 +1,26 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+
+# Backend local data
+backend/edurag.db
+backend/data/books/
+backend/data/processed/
+backend/data/qdrant/
+
+# Environment secrets
+backend/.env
+.env
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
