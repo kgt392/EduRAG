@@ -1,27 +1,36 @@
+import shutil
 from pathlib import Path
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
-    UploadFile,
     HTTPException,
+    UploadFile,
 )
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.models import Book, Chapter
-from app.services.pdf_processor import BOOKS_DIR, process_pdf
-from app.services.vector_store import index_book
+from app.services.ingestion_jobs import (
+    jobs,
+    run_book_ingestion,
+)
+from app.services.pdf_processor import BOOKS_DIR
 
 
-router = APIRouter(prefix="/books", tags=["Books"])
+router = APIRouter(
+    prefix="/books",
+    tags=["Books"],
+)
 
 
-@router.post("/upload")
+@router.post("/upload", status_code=202)
 async def upload_book(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     subject: str = Form("DBMS"),
     db: AsyncSession = Depends(get_db),
@@ -29,146 +38,72 @@ async def upload_book(
     if not file.filename:
         raise HTTPException(
             status_code=400,
-            detail="No file selected",
+            detail="No file selected.",
         )
 
-    if not file.filename.lower().endswith(".pdf"):
+    if not file.filename.lower().endswith(
+        ".pdf"
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Only PDF files are supported",
+            detail="Only PDF files are supported.",
         )
 
-    contents = await file.read()
-
-    if not contents:
-        raise HTTPException(
-            status_code=400,
-            detail="Empty PDF",
-        )
+    safe_name = Path(
+        file.filename
+    ).name
 
     book = Book(
-        title=Path(file.filename).stem,
+        title=Path(
+            safe_name
+        ).stem,
         subject=subject,
-        filename=file.filename,
+        filename=safe_name,
     )
 
     db.add(book)
+
     await db.commit()
     await db.refresh(book)
 
-    pdf_path = BOOKS_DIR / f"{book.id}_{file.filename}"
+    pdf_path = (
+        BOOKS_DIR
+        / f"{book.id}_{safe_name}"
+    )
 
-    try:
-        with open(pdf_path, "wb") as output_file:
-            output_file.write(contents)
-
-        processed_data, processed_path = process_pdf(
-            pdf_path,
-            book.id,
+    with open(
+        pdf_path,
+        "wb",
+    ) as output:
+        shutil.copyfileobj(
+            file.file,
+            output,
         )
 
-        for chapter in processed_data["chapters"]:
-            db.add(
-                Chapter(
-                    book_id=book.id,
-                    chapter_number=chapter["chapter_number"],
-                    title=chapter["title"],
-                )
-            )
+    jobs[book.id] = {
+        "status": "QUEUED",
+        "progress": 0,
+        "book_id": book.id,
+    }
 
-        await db.commit()
-
-        vector_data = index_book(book.id)
-
-    except Exception as exc:
-        await db.rollback()
-
-        if pdf_path.exists():
-            pdf_path.unlink()
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Book processing failed: {exc}",
-        )
+    background_tasks.add_task(
+        run_book_ingestion,
+        book.id,
+        str(pdf_path),
+    )
 
     return {
-        "message": "Book processed and indexed successfully",
+        "message": (
+            "Book upload accepted. "
+            "Processing started."
+        ),
         "book": {
             "id": book.id,
             "title": book.title,
             "subject": book.subject,
             "filename": book.filename,
         },
-        "pages_processed": len(processed_data["pages"]),
-        "chunks_created": len(processed_data["chunks"]),
-        "chapters_detected": len(processed_data["chapters"]),
-        "vectors_indexed": vector_data["chunks_indexed"],
-        "processed_file": str(processed_path),
-    }
-
-
-@router.post("/{book_id}/reprocess")
-async def reprocess_book(
-    book_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    book = await db.get(Book, book_id)
-
-    if not book:
-        raise HTTPException(
-            status_code=404,
-            detail="Book not found",
-        )
-
-    pdf_path = BOOKS_DIR / f"{book.id}_{book.filename}"
-
-    if not pdf_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Original PDF not found",
-        )
-
-    try:
-        processed_data, processed_path = process_pdf(
-            pdf_path,
-            book.id,
-        )
-
-        await db.execute(
-            delete(Chapter).where(
-                Chapter.book_id == book.id
-            )
-        )
-
-        for chapter in processed_data["chapters"]:
-            db.add(
-                Chapter(
-                    book_id=book.id,
-                    chapter_number=chapter["chapter_number"],
-                    title=chapter["title"],
-                )
-            )
-
-        await db.commit()
-
-        vector_data = index_book(book.id)
-
-    except Exception as exc:
-        await db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Reprocessing failed: {exc}",
-        )
-
-    return {
-        "message": "Book reprocessed successfully",
-        "book_id": book.id,
-        "pages_processed": len(processed_data["pages"]),
-        "chunks_created": len(processed_data["chunks"]),
-        "chapters_detected": len(processed_data["chapters"]),
-        "vectors_indexed": vector_data["chunks_indexed"],
-        "processed_file": str(processed_path),
+        "status": "QUEUED",
     }
 
 
@@ -176,7 +111,10 @@ async def reprocess_book(
 async def get_books(
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Book))
+    result = await db.execute(
+        select(Book)
+    )
+
     books = result.scalars().all()
 
     return [
@@ -185,9 +123,29 @@ async def get_books(
             "title": book.title,
             "subject": book.subject,
             "filename": book.filename,
+            "processing": jobs.get(
+                book.id,
+                {},
+            ).get(
+                "status",
+                "READY",
+            ),
         }
         for book in books
     ]
+
+
+@router.get("/{book_id}/status")
+async def book_status(
+    book_id: int,
+):
+    return jobs.get(
+        book_id,
+        {
+            "status": "UNKNOWN",
+            "book_id": book_id,
+        },
+    )
 
 
 @router.get("/{book_id}/chapters")
@@ -197,8 +155,12 @@ async def get_chapters(
 ):
     result = await db.execute(
         select(Chapter)
-        .where(Chapter.book_id == book_id)
-        .order_by(Chapter.chapter_number)
+        .where(
+            Chapter.book_id == book_id
+        )
+        .order_by(
+            Chapter.chapter_number
+        )
     )
 
     chapters = result.scalars().all()
