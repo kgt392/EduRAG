@@ -15,7 +15,8 @@ from app.core.database import get_db
 from app.models.models import Book, Chapter
 from app.services.pdf_processor import BOOKS_DIR, process_pdf
 from app.services.vector_store import index_book
-
+from app.services.pdf_processor import BOOKS_DIR, PROCESSED_DIR, process_pdf
+from app.services.vector_store import index_book, delete_book_vectors
 
 router = APIRouter(prefix="/books", tags=["Books"])
 
@@ -211,3 +212,55 @@ async def get_chapters(
         }
         for chapter in chapters
     ]
+
+from app.services.vector_store import index_book, delete_book_vectors
+from app.services.pdf_processor import BOOKS_DIR, PROCESSED_DIR, process_pdf
+
+
+@router.delete("/{book_id}")
+async def delete_book(
+    book_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    book = await db.get(Book, book_id)
+
+    if not book:
+        raise HTTPException(
+            status_code=404,
+            detail="Book not found",
+        )
+
+    deleted_files = []
+    errors = []
+
+    # 1. Delete vectors from Qdrant
+    try:
+        delete_book_vectors(book_id)
+    except Exception as exc:
+        errors.append(f"Vector deletion failed: {exc}")
+
+    # 2. Delete chapters from DB
+    await db.execute(delete(Chapter).where(Chapter.book_id == book_id))
+
+    # 3. Delete processed JSON
+    processed_path = PROCESSED_DIR / f"book_{book_id}.json"
+    if processed_path.exists():
+        processed_path.unlink()
+        deleted_files.append(str(processed_path))
+
+    # 4. Delete original PDF
+    pdf_path = BOOKS_DIR / f"{book.id}_{book.filename}"
+    if pdf_path.exists():
+        pdf_path.unlink()
+        deleted_files.append(str(pdf_path))
+
+    # 5. Delete book row
+    await db.delete(book)
+    await db.commit()
+
+    return {
+        "message": f"Book '{book.title}' deleted successfully",
+        "book_id": book_id,
+        "deleted_files": deleted_files,
+        "errors": errors,
+    }

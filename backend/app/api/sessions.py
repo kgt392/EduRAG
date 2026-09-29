@@ -19,7 +19,6 @@
 #     build_grounded_answer,
 # )
 
-
 # router = APIRouter(
 #     prefix="/sessions",
 #     tags=["Sessions"],
@@ -29,10 +28,7 @@
 # def generate_code(length=6):
 #     chars = string.ascii_uppercase + string.digits
 
-#     return "".join(
-#         secrets.choice(chars)
-#         for _ in range(length)
-#     )
+#     return "".join(secrets.choice(chars) for _ in range(length))
 
 
 # async def is_ended(
@@ -78,11 +74,7 @@
 # async def list_sessions(
 #     db: AsyncSession = Depends(get_db),
 # ):
-#     result = await db.execute(
-#         select(Session).order_by(
-#             Session.created_at.desc()
-#         )
-#     )
+#     result = await db.execute(select(Session).order_by(Session.created_at.desc()))
 
 #     sessions = result.scalars().all()
 
@@ -90,10 +82,8 @@
 
 #     for session in sessions:
 #         student_result = await db.execute(
-#             select(SessionStudent.student_name)
-#             .where(
-#                 SessionStudent.session_id
-#                 == session.id
+#             select(SessionStudent.student_name).where(
+#                 SessionStudent.session_id == session.id
 #             )
 #         )
 
@@ -107,9 +97,7 @@
 #                 "join_code": session.join_code,
 #                 "locked": session.locked,
 #                 "ended": False,
-#                 "student_count": len(
-#                     set(students)
-#                 ),
+#                 "student_count": len(set(students)),
 #                 "created_at": session.created_at,
 #             }
 #         )
@@ -135,18 +123,12 @@
 #         )
 
 #     result = await db.execute(
-#         select(Chapter).where(
-#             Chapter.id.in_(
-#                 request.chapter_ids
-#             )
-#         )
+#         select(Chapter).where(Chapter.id.in_(request.chapter_ids))
 #     )
 
 #     chapters = result.scalars().all()
 
-#     if len(chapters) != len(
-#         set(request.chapter_ids)
-#     ):
+#     if len(chapters) != len(set(request.chapter_ids)):
 #         raise HTTPException(
 #             status_code=400,
 #             detail="Invalid chapter selection",
@@ -164,9 +146,7 @@
 #     await db.commit()
 #     await db.refresh(session)
 
-#     for chapter_id in set(
-#         request.chapter_ids
-#     ):
+#     for chapter_id in set(request.chapter_ids):
 #         db.add(
 #             SessionChapter(
 #                 session_id=session.id,
@@ -185,9 +165,7 @@
 #         "join_code": session.join_code,
 #         "locked": False,
 #         "ended": False,
-#         "chapter_ids": list(
-#             set(request.chapter_ids)
-#         ),
+#         "chapter_ids": list(set(request.chapter_ids)),
 #     }
 
 
@@ -211,13 +189,9 @@
 #         select(Chapter)
 #         .join(
 #             SessionChapter,
-#             SessionChapter.chapter_id
-#             == Chapter.id,
+#             SessionChapter.chapter_id == Chapter.id,
 #         )
-#         .where(
-#             SessionChapter.session_id
-#             == session.id
-#         )
+#         .where(SessionChapter.session_id == session.id)
 #     )
 
 #     chapters = result.scalars().all()
@@ -286,24 +260,14 @@
 #         )
 
 #     # Delete everything belonging to this session.
+#     await db.execute(delete(Activity).where(Activity.session_id == session_id))
+
 #     await db.execute(
-#         delete(Activity).where(
-#             Activity.session_id == session_id
-#         )
+#         delete(SessionStudent).where(SessionStudent.session_id == session_id)
 #     )
 
 #     await db.execute(
-#         delete(SessionStudent).where(
-#             SessionStudent.session_id
-#             == session_id
-#         )
-#     )
-
-#     await db.execute(
-#         delete(SessionChapter).where(
-#             SessionChapter.session_id
-#             == session_id
-#         )
+#         delete(SessionChapter).where(SessionChapter.session_id == session_id)
 #     )
 
 #     await db.delete(session)
@@ -324,10 +288,7 @@
 #     db: AsyncSession = Depends(get_db),
 # ):
 #     result = await db.execute(
-#         select(Session).where(
-#             Session.join_code
-#             == request.join_code.upper()
-#         )
+#         select(Session).where(Session.join_code == request.join_code.upper())
 #     )
 
 #     session = result.scalar_one_or_none()
@@ -346,10 +307,8 @@
 
 #     existing = await db.execute(
 #         select(SessionStudent).where(
-#             SessionStudent.session_id
-#             == session.id,
-#             SessionStudent.student_name
-#             == request.student_name,
+#             SessionStudent.session_id == session.id,
+#             SessionStudent.student_name == request.student_name,
 #         )
 #     )
 
@@ -376,13 +335,9 @@
 #         select(Chapter)
 #         .join(
 #             SessionChapter,
-#             SessionChapter.chapter_id
-#             == Chapter.id,
+#             SessionChapter.chapter_id == Chapter.id,
 #         )
-#         .where(
-#             SessionChapter.session_id
-#             == session.id
-#         )
+#         .where(SessionChapter.session_id == session.id)
 #     )
 
 #     chapters = result.scalars().all()
@@ -420,13 +375,20 @@
 #             detail="Session not found",
 #         )
 
+#     # Remove the student's membership so the count decreases
+#     await db.execute(
+#         delete(SessionStudent).where(
+#             SessionStudent.session_id == session_id,
+#             SessionStudent.student_name == request.student_name,
+#         )
+#     )
+
 #     db.add(
 #         Activity(
 #             session_id=session_id,
 #             student_name=request.student_name,
 #             event_type="SESSION_EXIT",
-#             details=request.details
-#             or "Student left the session.",
+#             details=request.details or "Student left the session.",
 #         )
 #     )
 
@@ -485,13 +447,8 @@
 
 #     result = await db.execute(
 #         select(Activity)
-#         .where(
-#             Activity.session_id
-#             == session_id
-#         )
-#         .order_by(
-#             Activity.created_at.desc()
-#         )
+#         .where(Activity.session_id == session_id)
+#         .order_by(Activity.created_at.desc())
 #     )
 
 #     activities = result.scalars().all()
@@ -527,10 +484,8 @@
 
 #     student_result = await db.execute(
 #         select(SessionStudent).where(
-#             SessionStudent.session_id
-#             == session_id,
-#             SessionStudent.student_name
-#             == request.student_name,
+#             SessionStudent.session_id == session_id,
+#             SessionStudent.student_name == request.student_name,
 #         )
 #     )
 
@@ -544,13 +499,9 @@
 #         select(Chapter)
 #         .join(
 #             SessionChapter,
-#             SessionChapter.chapter_id
-#             == Chapter.id,
+#             SessionChapter.chapter_id == Chapter.id,
 #         )
-#         .where(
-#             SessionChapter.session_id
-#             == session_id
-#         )
+#         .where(SessionChapter.session_id == session_id)
 #     )
 
 #     chapters = result.scalars().all()
@@ -586,17 +537,11 @@
 #         ),
 #         "result": {
 #             "score": best["score"],
-#             "semantic_score": best[
-#                 "semantic_score"
-#             ],
+#             "semantic_score": best["semantic_score"],
 #             "page": best["page"],
 #             "book_id": best["book_id"],
-#             "chapter_number": best[
-#                 "chapter_number"
-#             ],
-#             "chapter_title": best[
-#                 "chapter_title"
-#             ],
+#             "chapter_number": best["chapter_number"],
+#             "chapter_title": best["chapter_title"],
 #             "source_text": best["text"],
 #         },
 #     }
@@ -1121,31 +1066,28 @@ async def session_search(
     results = search_chunks(
         query=request.query,
         allowed_pairs=allowed_pairs,
-        limit=1,
+        limit=3,
     )
 
     if not results:
         return {
             "query": request.query,
-            "answer": "No relevant information was found in the approved material.",
-            "result": None,
+            "results": [],
         }
-
-    best = results[0]
 
     return {
         "query": request.query,
-        "answer": build_grounded_answer(
-            request.query,
-            best,
-        ),
-        "result": {
-            "score": best["score"],
-            "semantic_score": best["semantic_score"],
-            "page": best["page"],
-            "book_id": best["book_id"],
-            "chapter_number": best["chapter_number"],
-            "chapter_title": best["chapter_title"],
-            "source_text": best["text"],
-        },
+        "results": [
+            {
+                "answer": build_grounded_answer(request.query, item),
+                "score": item["score"],
+                "semantic_score": item["semantic_score"],
+                "page": item["page"],
+                "book_id": item["book_id"],
+                "chapter_number": item["chapter_number"],
+                "chapter_title": item["chapter_title"],
+                "source_text": item["text"],
+            }
+            for item in results
+        ],
     }
