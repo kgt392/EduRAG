@@ -1,17 +1,19 @@
 import json
+import os
+import time
 from pathlib import Path
 
+import torch
+from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    VectorParams,
-    PointStruct,
-    Filter,
-    FieldCondition,
-    MatchValue,
-    FilterSelector,
+from qdrant_client import models
+from sentence_transformers import (
+    CrossEncoder,
+    SentenceTransformer,
 )
-from sentence_transformers import SentenceTransformer, CrossEncoder
+
+
+load_dotenv()
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -21,10 +23,61 @@ PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
 COLLECTION_NAME = "edurag_chunks"
 
-client = QdrantClient(path=str(QDRANT_PATH))
+
+EMBED_BATCH_SIZE = int(
+    os.getenv("EMBED_BATCH_SIZE", "128")
+)
+
+UPLOAD_BATCH_SIZE = int(
+    os.getenv("QDRANT_UPLOAD_BATCH_SIZE", "256")
+)
+
+VECTOR_TOP_K = int(
+    os.getenv("RAG_VECTOR_TOP_K", "12")
+)
+
+RERANK_TOP_K = int(
+    os.getenv("RAG_RERANK_TOP_K", "8")
+)
+
+RERANK_ENABLED = (
+    os.getenv(
+        "RAG_RERANK_ENABLED",
+        "true",
+    ).lower()
+    == "true"
+)
+
+EMBEDDING_DEVICE = os.getenv(
+    "EMBEDDING_DEVICE",
+    "cuda" if torch.cuda.is_available() else "cpu",
+)
+
+
+QDRANT_URL = os.getenv("QDRANT_URL", "").strip()
+QDRANT_API_KEY = os.getenv(
+    "QDRANT_API_KEY",
+    "",
+).strip()
+
+
+if QDRANT_URL:
+    client = QdrantClient(
+        url=QDRANT_URL,
+        api_key=QDRANT_API_KEY or None,
+        prefer_grpc=True,
+    )
+    REMOTE_QDRANT = True
+else:
+    client = QdrantClient(
+        path=str(QDRANT_PATH)
+    )
+    REMOTE_QDRANT = False
+
 
 embedding_model = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2"
+    "sentence-transformers/all-MiniLM-L6-v2",
+    device=EMBEDDING_DEVICE,
 )
 
 reranker = None
@@ -35,59 +88,111 @@ def get_reranker():
 
     if reranker is None:
         reranker = CrossEncoder(
-            "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            max_length=384,
         )
 
     return reranker
 
 
 def ensure_collection():
-    collections = client.get_collections().collections
-
-    if not any(
-        collection.name == COLLECTION_NAME
-        for collection in collections
+    if client.collection_exists(
+        COLLECTION_NAME
     ):
-        vector_size = (
-            embedding_model.get_embedding_dimension()
-        )
+        return
 
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=vector_size,
-                distance=Distance.COSINE,
-            ),
-        )
+    dimension = (
+        embedding_model
+        .get_embedding_dimension()
+    )
+
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=models.VectorParams(
+            size=dimension,
+            distance=models.Distance.COSINE,
+        ),
+    )
+
+    # These are the fields used by session-scoped
+    # retrieval. Qdrant recommends payload indexes
+    # for filtered searches.
+    for field_name, field_type in [
+        (
+            "book_id",
+            models.PayloadSchemaType.INTEGER,
+        ),
+        (
+            "chapter_number",
+            models.PayloadSchemaType.INTEGER,
+        ),
+        (
+            "scope_key",
+            models.PayloadSchemaType.KEYWORD,
+        ),
+    ]:
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name=field_name,
+                field_schema=field_type,
+            )
+        except Exception:
+            pass
+
+
+def ensure_payload_indexes():
+    for field_name, field_type in [
+        (
+            "book_id",
+            models.PayloadSchemaType.INTEGER,
+        ),
+        (
+            "chapter_number",
+            models.PayloadSchemaType.INTEGER,
+        ),
+        (
+            "scope_key",
+            models.PayloadSchemaType.KEYWORD,
+        ),
+    ]:
+        try:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name=field_name,
+                field_schema=field_type,
+            )
+        except Exception:
+            pass
 
 
 def delete_book_vectors(book_id: int):
     ensure_collection()
 
-    selector = FilterSelector(
-        filter=Filter(
-            must=[
-                FieldCondition(
-                    key="book_id",
-                    match=MatchValue(
-                        value=book_id
-                    ),
-                )
-            ]
-        )
-    )
-
     client.delete(
         collection_name=COLLECTION_NAME,
-        points_selector=selector,
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="book_id",
+                        match=models.MatchValue(
+                            value=book_id
+                        ),
+                    )
+                ]
+            )
+        ),
     )
 
 
 def index_book(book_id: int):
     ensure_collection()
+    ensure_payload_indexes()
 
     processed_file = (
-        PROCESSED_DIR / f"book_{book_id}.json"
+        PROCESSED_DIR
+        / f"book_{book_id}.json"
     )
 
     if not processed_file.exists():
@@ -102,15 +207,14 @@ def index_book(book_id: int):
     ) as file:
         data = json.load(file)
 
-    chunks = data["chunks"]
+    chunks = data.get("chunks", [])
 
     if not chunks:
         raise ValueError(
-            "No text chunks were extracted."
+            "No chunks found."
         )
 
-    # Important when reprocessing.
-    delete_book_vectors(book_id)
+    embedding_start = time.perf_counter()
 
     texts = [
         chunk["text"]
@@ -119,25 +223,42 @@ def index_book(book_id: int):
 
     embeddings = embedding_model.encode(
         texts,
+        batch_size=EMBED_BATCH_SIZE,
         show_progress_bar=True,
         normalize_embeddings=True,
+        convert_to_numpy=True,
     )
 
-    points = []
+    embedding_seconds = (
+        time.perf_counter()
+        - embedding_start
+    )
 
-    for index, (
-        chunk,
-        embedding,
-    ) in enumerate(
-        zip(chunks, embeddings)
-    ):
-        points.append(
-            PointStruct(
-                id=(book_id * 1_000_000) + index,
+    # Delete only after successful embedding.
+    delete_book_vectors(book_id)
+
+    def point_generator():
+        for index, (
+            chunk,
+            embedding,
+        ) in enumerate(
+            zip(chunks, embeddings)
+        ):
+            scope_key = (
+                f"{book_id}:"
+                f"{chunk['chapter_number']}"
+            )
+
+            yield models.PointStruct(
+                id=(
+                    book_id * 1_000_000
+                    + index
+                ),
                 vector=embedding.tolist(),
                 payload={
                     "book_id": book_id,
                     "chunk_index": index,
+                    "scope_key": scope_key,
                     "text": chunk["text"],
                     "page": chunk["page"],
                     "chapter_number": chunk[
@@ -148,93 +269,138 @@ def index_book(book_id: int):
                     ],
                 },
             )
-        )
 
-    client.upsert(
+    upload_start = time.perf_counter()
+
+    client.upload_points(
         collection_name=COLLECTION_NAME,
-        points=points,
+        points=point_generator(),
+        batch_size=UPLOAD_BATCH_SIZE,
+        parallel=2 if REMOTE_QDRANT else 1,
+        max_retries=3,
+        wait=True,
+    )
+
+    upload_seconds = (
+        time.perf_counter()
+        - upload_start
     )
 
     return {
         "book_id": book_id,
-        "chunks_indexed": len(points),
+        "chunks_indexed": len(chunks),
         "collection": COLLECTION_NAME,
-        "vector_dimension": len(
-            embeddings[0]
+        "vector_dimension": int(
+            embeddings.shape[1]
+        ),
+        "embedding_seconds": round(
+            embedding_seconds,
+            3,
+        ),
+        "upload_seconds": round(
+            upload_seconds,
+            3,
+        ),
+        "chunks_per_second": round(
+            len(chunks)
+            / max(embedding_seconds, 0.001),
+            2,
         ),
     }
 
 
+def build_filter(
+    book_id=None,
+    chapter_number=None,
+    allowed_pairs=None,
+):
+    if allowed_pairs:
+        scope_keys = [
+            f"{book}:{chapter}"
+            for book, chapter
+            in allowed_pairs
+        ]
+
+        return models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="scope_key",
+                    match=models.MatchAny(
+                        any=scope_keys
+                    ),
+                )
+            ]
+        )
+
+    conditions = []
+
+    if book_id is not None:
+        conditions.append(
+            models.FieldCondition(
+                key="book_id",
+                match=models.MatchValue(
+                    value=book_id
+                ),
+            )
+        )
+
+    if chapter_number is not None:
+        conditions.append(
+            models.FieldCondition(
+                key="chapter_number",
+                match=models.MatchValue(
+                    value=chapter_number
+                ),
+            )
+        )
+
+    return (
+        models.Filter(must=conditions)
+        if conditions
+        else None
+    )
+
+
 def search_chunks(
     query: str,
-    book_id: int | None = None,
-    chapter_number: int | None = None,
-    allowed_pairs: list[tuple[int, int]]
-    | None = None,
-    limit: int = 1,
+    book_id=None,
+    chapter_number=None,
+    allowed_pairs=None,
+    limit=1,
 ):
     ensure_collection()
 
     query_embedding = embedding_model.encode(
-        query,
+        [query],
+        batch_size=1,
+        show_progress_bar=False,
         normalize_embeddings=True,
+        convert_to_numpy=True,
+    )[0]
+
+    query_filter = build_filter(
+        book_id=book_id,
+        chapter_number=chapter_number,
+        allowed_pairs=allowed_pairs,
     )
-
-    query_filter = None
-
-    if book_id is not None:
-        conditions = [
-            FieldCondition(
-                key="book_id",
-                match=MatchValue(
-                    value=book_id
-                ),
-            )
-        ]
-
-        if chapter_number is not None:
-            conditions.append(
-                FieldCondition(
-                    key="chapter_number",
-                    match=MatchValue(
-                        value=chapter_number
-                    ),
-                )
-            )
-
-        query_filter = Filter(
-            must=conditions
-        )
 
     result = client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_embedding.tolist(),
         query_filter=query_filter,
         with_payload=True,
-        limit=max(limit * 10, 40),
+        limit=max(
+            RERANK_TOP_K
+            if RERANK_ENABLED
+            else limit,
+            VECTOR_TOP_K,
+        ),
     )
 
     candidates = []
 
-    allowed = (
-        set(allowed_pairs)
-        if allowed_pairs is not None
-        else None
-    )
-
     for point in result.points:
         payload = point.payload or {}
-
-        pair = (
-            payload.get("book_id"),
-            payload.get("chapter_number"),
-        )
-
-        if (
-            allowed is not None
-            and pair not in allowed
-        ):
-            continue
 
         candidates.append(
             {
@@ -245,7 +411,9 @@ def search_chunks(
                     "text",
                     "",
                 ),
-                "page": payload.get("page"),
+                "page": payload.get(
+                    "page"
+                ),
                 "book_id": payload.get(
                     "book_id"
                 ),
@@ -261,25 +429,44 @@ def search_chunks(
     if not candidates:
         return []
 
-    model = get_reranker()
+    if RERANK_ENABLED:
+        candidates = candidates[
+            :RERANK_TOP_K
+        ]
 
-    pairs = [
-        [query, candidate["text"]]
-        for candidate in candidates
-    ]
+        model = get_reranker()
 
-    scores = model.predict(pairs)
+        pairs = [
+            [
+                query,
+                candidate["text"],
+            ]
+            for candidate in candidates
+        ]
 
-    for candidate, score in zip(
-        candidates,
-        scores,
-    ):
-        candidate["score"] = float(score)
+        scores = model.predict(
+            pairs,
+            batch_size=32,
+            show_progress_bar=False,
+        )
 
-    candidates.sort(
-        key=lambda item: item["score"],
-        reverse=True,
-    )
+        for candidate, score in zip(
+            candidates,
+            scores,
+        ):
+            candidate["score"] = float(
+                score
+            )
+
+        candidates.sort(
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+    else:
+        for candidate in candidates:
+            candidate["score"] = candidate[
+                "semantic_score"
+            ]
 
     return candidates[:limit]
 
@@ -287,16 +474,13 @@ def search_chunks(
 def build_grounded_answer(
     query: str,
     result: dict,
-) -> str:
-    text = result["text"]
-
-    cleaned = " ".join(
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    )
-
+):
     return (
-        "According to the approved material: "
-        + cleaned
+        "According to the approved "
+        "material: "
+        + " ".join(
+            line.strip()
+            for line in result["text"].splitlines()
+            if line.strip()
+        )
     )

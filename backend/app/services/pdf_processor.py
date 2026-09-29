@@ -1,12 +1,13 @@
 import json
 import re
-import statistics
+import time
 from pathlib import Path
 
-import fitz
+import pymupdf
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+
 BOOKS_DIR = BASE_DIR / "data" / "books"
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
@@ -15,19 +16,31 @@ PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 EXPLICIT_CHAPTER = re.compile(
-    r"^\s*(chapter|unit|module)\s+([0-9]+|[IVXLC]+)\s*[:.\-–—]?\s*(.*)$",
+    r"^\s*(chapter|unit|module)\s+"
+    r"([0-9]+|[IVXLC]+)"
+    r"\s*[:.\-–—]?\s*(.*)$",
     re.IGNORECASE,
 )
 
 NUMERIC_CHAPTER = re.compile(
-    r"^\s*(\d{1,2})\s*[.)\-:]?\s+([A-Za-z][A-Za-z0-9 &/,()'’\-–—]{2,100})\s*$"
+    r"^\s*(\d{1,2})"
+    r"(?:[.)\-:]|\s+)"
+    r"\s*([A-Za-z][A-Za-z0-9 &/,()'’\-–—]{2,120})"
+    r"\s*$"
 )
 
 
-def clean_title(title: str) -> str:
-    title = re.sub(r"\s+", " ", title).strip()
-    title = re.sub(r"\s+\d+$", "", title).strip()
-    return title
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 100
+
+
+def clean_title(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # Remove trailing TOC page number.
+    text = re.sub(r"\s+\d{1,4}$", "", text)
+
+    return text
 
 
 def parse_chapter_title(text: str):
@@ -36,14 +49,15 @@ def parse_chapter_title(text: str):
     match = EXPLICIT_CHAPTER.match(text)
 
     if match:
-        number = match.group(2)
-        title = match.group(3).strip()
-
         return {
-            "raw_number": number,
+            "number": str(match.group(2)),
             "title": (
-                f"Chapter {number}"
-                + (f": {title}" if title else "")
+                f"Chapter {match.group(2)}"
+                + (
+                    f": {match.group(3).strip()}"
+                    if match.group(3).strip()
+                    else ""
+                )
             ),
         }
 
@@ -51,72 +65,17 @@ def parse_chapter_title(text: str):
 
     if match:
         number = int(match.group(1))
-        title = match.group(2).strip()
 
-        # Avoid treating decimal sections like 1.1 as chapters.
-        if 1 <= number <= 50 and len(title) >= 3:
+        if 1 <= number <= 50:
             return {
-                "raw_number": str(number),
-                "title": f"Chapter {number}: {title}",
+                "number": str(number),
+                "title": f"Chapter {number}: {match.group(2).strip()}",
             }
 
     return None
 
 
-def line_is_prominent(page, target_text: str) -> bool:
-    """
-    Numeric headings can resemble normal numbered text.
-    Only accept them when the PDF visually formats them
-    like a heading.
-    """
-    try:
-        data = page.get_text("dict")
-
-        all_sizes = []
-        target_sizes = []
-
-        target = target_text.strip()
-
-        for block in data.get("blocks", []):
-            for line in block.get("lines", []):
-                spans = line.get("spans", [])
-
-                line_text = "".join(
-                    span.get("text", "")
-                    for span in spans
-                ).strip()
-
-                for span in spans:
-                    size = span.get("size")
-                    if size:
-                        all_sizes.append(float(size))
-
-                if line_text == target:
-                    for span in spans:
-                        size = span.get("size")
-                        if size:
-                            target_sizes.append(float(size))
-
-        if not all_sizes or not target_sizes:
-            return False
-
-        median_size = statistics.median(all_sizes)
-        target_size = max(target_sizes)
-
-        return (
-            target_size >= median_size + 1.0
-            or target_size >= max(all_sizes) - 0.5
-        )
-
-    except Exception:
-        return False
-
-
 def detect_outline_chapters(document):
-    """
-    First preference: PDF bookmarks / document outline.
-    Many textbooks contain chapter structure here.
-    """
     markers = []
 
     try:
@@ -130,13 +89,12 @@ def detect_outline_chapters(document):
 
         level, title, page_number = item[:3]
 
+        if level > 2:
+            continue
+
         parsed = parse_chapter_title(title)
 
         if not parsed:
-            continue
-
-        # Prefer top-level / near-top-level outline items.
-        if level > 2:
             continue
 
         if page_number < 1:
@@ -149,19 +107,13 @@ def detect_outline_chapters(document):
             }
         )
 
-    # Remove duplicates.
     unique = []
 
     for marker in sorted(markers, key=lambda x: x["page"]):
-        if not unique:
-            unique.append(marker)
-            continue
-
-        previous = unique[-1]
-
         if (
-            previous["page"] == marker["page"]
-            and previous["title"] == marker["title"]
+            unique
+            and unique[-1]["page"] == marker["page"]
+            and unique[-1]["title"] == marker["title"]
         ):
             continue
 
@@ -170,19 +122,14 @@ def detect_outline_chapters(document):
     return unique
 
 
-def detect_page_chapters(document):
-    """
-    Fallback chapter detection when the PDF has no useful outline.
-    """
+def detect_page_chapters(page_records):
     markers = []
 
-    for page_index, page in enumerate(document):
-        page_number = page_index + 1
+    expected_number = 1
 
-        text = page.get_text("text").strip()
-
-        if not text:
-            continue
+    for record in page_records:
+        page_number = record["page"]
+        text = record["text"]
 
         lines = [
             line.strip()
@@ -190,72 +137,72 @@ def detect_page_chapters(document):
             if line.strip()
         ]
 
-        # Chapter titles usually appear near the beginning of a page.
-        for line in lines[:40]:
+        for line in lines[:25]:
             parsed = parse_chapter_title(line)
 
             if not parsed:
                 continue
 
-            # Explicit Chapter / Unit / Module headings are accepted.
-            if EXPLICIT_CHAPTER.match(line):
+            is_explicit = bool(EXPLICIT_CHAPTER.match(line))
+
+            if is_explicit:
                 markers.append(
                     {
                         "page": page_number,
                         "title": parsed["title"],
                     }
                 )
+
+                try:
+                    expected_number = (
+                        int(parsed["number"]) + 1
+                    )
+                except ValueError:
+                    expected_number += 1
+
                 break
 
-            # Numeric headings need visual confirmation.
-            if line_is_prominent(page, line):
+            number = int(parsed["number"])
+
+            # Sequential numbering dramatically reduces
+            # false positives from section lists.
+            if number == expected_number:
                 markers.append(
                     {
                         "page": page_number,
                         "title": parsed["title"],
                     }
                 )
+
+                expected_number += 1
                 break
 
     return markers
 
 
-def build_chapter_ranges(
-    document,
-    markers,
-):
-    """
-    Convert chapter start pages into chapter metadata
-    that can be attached to every extracted page/chunk.
-    """
+def build_chapters(total_pages, markers):
     if not markers:
-        return []
-
-    # Deduplicate same page/title.
-    cleaned = []
-
-    for marker in sorted(
-        markers,
-        key=lambda x: (x["page"], x["title"]),
-    ):
-        if any(
-            item["page"] == marker["page"]
-            and item["title"] == marker["title"]
-            for item in cleaned
-        ):
-            continue
-
-        cleaned.append(marker)
+        return [
+            {
+                "chapter_number": 1,
+                "title": "General",
+                "page": 1,
+                "start_page": 1,
+                "end_page": total_pages,
+            }
+        ]
 
     chapters = []
 
-    for index, marker in enumerate(cleaned):
+    for index, marker in enumerate(
+        sorted(markers, key=lambda x: x["page"])
+    ):
         start_page = marker["page"]
 
-        if index + 1 < len(cleaned):
-            end_page = cleaned[index + 1]["page"] - 1
+        if index + 1 < len(markers):
+            end_page = markers[index + 1]["page"] - 1
         else:
-            end_page = len(document)
+            end_page = total_pages
 
         chapters.append(
             {
@@ -270,116 +217,192 @@ def build_chapter_ranges(
     return chapters
 
 
-def process_pdf(pdf_path: Path, book_id: int):
-    document = fitz.open(pdf_path)
-
-    total_pdf_pages = len(document)
-    empty_pages = 0
-
-    outline_markers = detect_outline_chapters(document)
-
-    if outline_markers:
-        chapter_markers = outline_markers
-        detection_method = "pdf_outline"
-    else:
-        chapter_markers = detect_page_chapters(document)
-        detection_method = "heading_detection"
-
-    chapters = build_chapter_ranges(
-        document,
-        chapter_markers,
-    )
-
-    if not chapters:
-        chapters = [
-            {
-                "chapter_number": 1,
-                "title": "General",
-                "page": 1,
-                "start_page": 1,
-                "end_page": total_pdf_pages,
-            }
-        ]
-
-    pages = []
+def make_chunks(text: str):
     chunks = []
 
-    for page_index, page in enumerate(document):
-        page_number = page_index + 1
+    start = 0
+    length = len(text)
 
+    while start < length:
+        target_end = min(
+            start + CHUNK_SIZE,
+            length,
+        )
+
+        end = target_end
+
+        if end < length:
+            space = text.rfind(
+                " ",
+                start,
+                target_end,
+            )
+
+            if space > start + int(CHUNK_SIZE * 0.75):
+                end = space
+
+        chunk_text = text[start:end].strip()
+
+        if chunk_text:
+            chunks.append(chunk_text)
+
+        if end >= length:
+            break
+
+        start = max(
+            end - CHUNK_OVERLAP,
+            start + 1,
+        )
+
+    return chunks
+
+
+def process_pdf(pdf_path: Path, book_id: int):
+    total_start = time.perf_counter()
+
+    document = pymupdf.open(pdf_path)
+
+    total_pdf_pages = len(document)
+
+    extraction_start = time.perf_counter()
+
+    page_records = []
+
+    for page_index, page in enumerate(document):
         text = page.get_text("text").strip()
 
+        page_records.append(
+            {
+                "page": page_index + 1,
+                "text": text,
+            }
+        )
+
+    extraction_time = (
+        time.perf_counter() - extraction_start
+    )
+
+    chapter_start = time.perf_counter()
+
+    outline_markers = detect_outline_chapters(
+        document
+    )
+
+    if outline_markers:
+        markers = outline_markers
+        detection_method = "pdf_outline"
+    else:
+        markers = detect_page_chapters(
+            page_records
+        )
+        detection_method = "heading_detection"
+
+    chapters = build_chapters(
+        total_pdf_pages,
+        markers,
+    )
+
+    chapter_time = (
+        time.perf_counter() - chapter_start
+    )
+
+    chapter_index = 0
+
+    chunks = []
+    pages = []
+
+    chunk_start = time.perf_counter()
+
+    for record in page_records:
+        page_number = record["page"]
+        text = record["text"]
+
         if not text:
-            empty_pages += 1
             continue
 
-        current_chapter = chapters[0]
+        while (
+            chapter_index + 1 < len(chapters)
+            and page_number
+            >= chapters[chapter_index + 1][
+                "start_page"
+            ]
+        ):
+            chapter_index += 1
 
-        for chapter in chapters:
-            if page_number >= chapter["start_page"]:
-                current_chapter = chapter
-            else:
-                break
+        chapter = chapters[chapter_index]
 
         pages.append(
             {
                 "page": page_number,
                 "text": text,
-                "chapter_number": current_chapter["chapter_number"],
-                "chapter_title": current_chapter["title"],
+                "chapter_number": chapter[
+                    "chapter_number"
+                ],
+                "chapter_title": chapter[
+                    "title"
+                ],
             }
         )
 
-        # Smaller chunks improve semantic retrieval.
-        chunk_size = 600
-        overlap = 100
-
-        start = 0
-
-        while start < len(text):
-            end = min(
-                start + chunk_size,
-                len(text),
+        for chunk_text in make_chunks(text):
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "page": page_number,
+                    "chapter_number": chapter[
+                        "chapter_number"
+                    ],
+                    "chapter_title": chapter[
+                        "title"
+                    ],
+                }
             )
 
-            chunk_text = text[start:end].strip()
-
-            if chunk_text:
-                chunks.append(
-                    {
-                        "text": chunk_text,
-                        "page": page_number,
-                        "chapter_number": current_chapter[
-                            "chapter_number"
-                        ],
-                        "chapter_title": current_chapter[
-                            "title"
-                        ],
-                    }
-                )
-
-            if end == len(text):
-                break
-
-            start = end - overlap
+    chunk_time = (
+        time.perf_counter() - chunk_start
+    )
 
     document.close()
+
+    pages_with_text = len(pages)
+    pages_without_text = (
+        total_pdf_pages - pages_with_text
+    )
 
     output = {
         "book_id": book_id,
         "total_pdf_pages": total_pdf_pages,
-        "pages_with_text": len(pages),
-        "pages_without_text": empty_pages,
+        "pages_with_text": pages_with_text,
+        "pages_without_text": pages_without_text,
         "chapter_detection_method": detection_method,
+        "extraction_seconds": round(
+            extraction_time,
+            3,
+        ),
+        "chapter_detection_seconds": round(
+            chapter_time,
+            3,
+        ),
+        "chunking_seconds": round(
+            chunk_time,
+            3,
+        ),
+        "total_processing_seconds": round(
+            time.perf_counter() - total_start,
+            3,
+        ),
         "pages": pages,
         "chunks": chunks,
         "chapters": chapters,
     }
 
     output_path = (
-        PROCESSED_DIR / f"book_{book_id}.json"
+        PROCESSED_DIR
+        / f"book_{book_id}.json"
     )
 
+    # Compact JSON is substantially smaller than
+    # pretty-printing large books.
     with open(
         output_path,
         "w",
@@ -389,7 +412,7 @@ def process_pdf(pdf_path: Path, book_id: int):
             output,
             file,
             ensure_ascii=False,
-            indent=2,
+            separators=(",", ":"),
         )
 
     return output, output_path

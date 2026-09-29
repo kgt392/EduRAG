@@ -14,6 +14,8 @@ from app.models.models import (
     Chapter,
     Activity,
 )
+from app.services.llm_service import (generate_grounded_answer, build_citation)
+
 from app.services.vector_store import (
     search_chunks,
     build_grounded_answer,
@@ -578,25 +580,29 @@ async def session_search(
 
     best = results[0]
 
+    answer = generate_grounded_answer(
+        question=request.query,
+        source_text=best["text"],
+        page=best["page"],
+        chapter_title=best["chapter_title"],
+    )
+
+    citation = build_citation(
+        page=best["page"],
+        chapter_title=best["chapter_title"],
+    )
+
     return {
         "query": request.query,
-        "answer": build_grounded_answer(
-            request.query,
-            best,
-        ),
+        "answer": answer,
+        "citation": citation,
         "result": {
             "score": best["score"],
-            "semantic_score": best[
-                "semantic_score"
-            ],
+            "semantic_score": best["semantic_score"],
             "page": best["page"],
             "book_id": best["book_id"],
-            "chapter_number": best[
-                "chapter_number"
-            ],
-            "chapter_title": best[
-                "chapter_title"
-            ],
+            "chapter_number": best["chapter_number"],
+            "chapter_title": best["chapter_title"],
             "source_text": best["text"],
         },
     }
