@@ -298,6 +298,41 @@ npm run dev
 Frontend:
 
 http://localhost:3000
+
+### Access EduRAG from another PC on the same local network
+
+The PC running EduRAG is the **host**. The second PC only needs a browser; both
+computers must be connected to the same trusted Wi-Fi/Ethernet network.
+
+1. On the host PC, open Command Prompt and run `ipconfig`. Find the IPv4 Address
+   under the active Wi-Fi/Ethernet adapter, for example `192.168.1.25`.
+2. Start the backend from the repository root in one terminal:
+
+   ```powershell
+   cd backend
+   .\venv\Scripts\activate
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+
+3. Start the frontend in a second terminal:
+
+   ```powershell
+   cd frontend
+   npm run dev
+   ```
+
+4. On the other PC, enter `http://192.168.1.25:3000` in the browser, replacing
+   the example address with the host PC's IPv4 address. Do not use
+   `localhost` or `127.0.0.1` on the student PC.
+5. If Windows Firewall asks, allow Node.js and Python on **Private networks**.
+   If it still cannot connect, allow inbound TCP ports **3000** and **8000** on
+   the host PC's private-network firewall profile. You can test the backend at
+   `http://192.168.1.25:8000/health` from the second PC.
+
+Student search runs against the backend on the host PC, so the host's model,
+indexed textbooks, and database are used. Keep this limited to a trusted LAN;
+the current MVP does not provide production-grade authentication.
+
 Current End-to-End Demo
 
 The current MVP can demonstrate:

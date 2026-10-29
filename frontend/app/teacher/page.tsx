@@ -4,8 +4,11 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import BooksBackground from "../components/BooksBackground";
 
-const API = "http://localhost:8000";
-
+// // Keep API calls on the same host as the UI, including remote LAN browsers.
+// const API = typeof window === "undefined"
+//   ? "http://127.0.0.1:8000"
+//   : `${window.location.protocol}//${window.location.hostname}:8000`;
+const API = "/backend";
 type SessionInfo = {
   id: number;
   name: string;

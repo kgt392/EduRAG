@@ -462,8 +462,8 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import BooksBackground from "../../components/BooksBackground";
 
-const API = "http://127.0.0.1:8000";
-
+// const API = "http://127.0.0.1:8000";
+const API = "/backend";
 type Book = {
   id: number;
   title: string;

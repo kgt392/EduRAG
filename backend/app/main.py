@@ -40,6 +40,10 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ],
+    # Allow the UI when opened using a private LAN IPv4 address.
+    allow_origin_regex=(
+        r"^http://(?:localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}):3000$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
