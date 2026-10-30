@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import BooksBackground from "../components/BooksBackground";
 
-const API = "http://localhost:8000";
-
+const API = "/backend";
 type SessionInfo = {
   id: number;
   name: string;

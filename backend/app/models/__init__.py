@@ -3,5 +3,19 @@ from app.models.models import (
     Chapter,
     Session,
     SessionChapter,
+    SessionStudent,
     Activity,
+    Teacher,
+    TeacherLoginSession,
 )
+
+__all__ = [
+    "Book",
+    "Chapter",
+    "Session",
+    "SessionChapter",
+    "SessionStudent",
+    "Activity",
+    "Teacher",
+    "TeacherLoginSession",
+]

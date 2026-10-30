@@ -1,11 +1,9 @@
-// frontend/app/page.tsx
 "use client";
 
 import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 import BooksBackground from "./components/BooksBackground";
 
-/* ---------- Draggable open book (right side) ---------- */
 
 function DraggableBook() {
   // 0 = fully closed, 1 = fully open
@@ -29,7 +27,6 @@ function DraggableBook() {
 
   const onPointerUp = useCallback(() => {
     dragging.current = false;
-    // snap toward the nearer state
     setOpen((o) => (o > 0.5 ? 1 : o < 0.15 ? 0.12 : o));
   }, []);
 
@@ -188,8 +185,6 @@ function DraggableBook() {
   );
 }
 
-/* ---------- Page ---------- */
-
 export default function Home() {
   return (
     <main className="relative isolate min-h-screen text-white overflow-hidden">
@@ -210,7 +205,7 @@ export default function Home() {
 
           <div className="flex flex-col sm:flex-row gap-5 items-center justify-center mt-12">
             <PopButton
-              href="/teacher"
+              href="/teacher-login"
               title="I'm a Teacher"
               description="Upload books, manage chapters, run sessions"
               accent="from-cyan-500 to-blue-600"
