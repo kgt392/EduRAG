@@ -1,4 +1,3 @@
-// frontend/app/student/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -6,8 +5,6 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import BooksBackground from "../components/BooksBackground";
 
-// Use the host that served the frontend. On a second PC, localhost would
-// incorrectly refer to that student's own computer instead of the EduRAG host.
 // const API = typeof window === "undefined"
 //   ? "http://127.0.0.1:8000"
 //   : `${window.location.protocol}//${window.location.hostname}:8000`;

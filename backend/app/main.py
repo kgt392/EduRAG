@@ -11,11 +11,14 @@ from app.models.models import (
     SessionChapter,
     SessionStudent,
     Activity,
+    Teacher,
+    TeacherLoginSession,
 )
 
 from app.api.books import router as books_router
 from app.api.rag import router as rag_router
 from app.api.sessions import router as sessions_router
+from app.api.auth import router as auth_router
 
 
 @asynccontextmanager
@@ -50,9 +53,12 @@ app.add_middleware(
 )
 
 
+# Existing Books, RAG, and Sessions routers are intentionally unchanged.
+# Auth endpoints are independent; API authorization can be added separately later.
 app.include_router(books_router)
 app.include_router(rag_router)
 app.include_router(sessions_router)
+app.include_router(auth_router)
 
 
 @app.get("/")
